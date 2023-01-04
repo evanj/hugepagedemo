@@ -1,0 +1,19 @@
+[package]
+name = "hugepagedemo"
+version = "0.1.0"
+edition = "2021"
+
+[profile.release-nativecpu]
+inherits = "release"
+debug = true
+# still unstable: https://doc.rust-lang.org/nightly/cargo/reference/unstable.html#profile-rustflags-option
+# this is defined for make run_native
+# TODO: Uncomment once stable
+#rustflags = ["-C", "target-cpu=native"]
+
+[dependencies]
+humanunits = {git="https://github.com/evanj/humanunits"}
+memory-stats = "1"
+nix = {version="0", features=["mman"]}
+rand = "0"
+rand_xoshiro = "0"
