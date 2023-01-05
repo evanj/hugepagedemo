@@ -1,4 +1,6 @@
-all:
+CFLAGS=-Wall -Wextra -Werror -g -std=c17
+
+all: aligned_alloc_demo
 	cargo fmt
 	cargo test
 	cargo check
@@ -12,6 +14,8 @@ all:
 		-A clippy::cast_precision_loss \
 		-A clippy::cast-sign-loss \
 		-A clippy::cast-possible-truncation
+
+	clang-format -i '-style={BasedOnStyle: Google, ColumnLimit: 100}' *.c
 
 run_native:
 	RUSTFLAGS="-C target-cpu=native" cargo run --profile=release-nativecpu
