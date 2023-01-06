@@ -88,7 +88,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 struct MmapAligned {
     mmap_pointer: *mut c_void,
-    aligned_size: usize,
+    size: usize,
 }
 
 impl MmapAligned {
@@ -97,14 +97,14 @@ impl MmapAligned {
         // worse case alignment: mmap returns 1 byte off the alignment, we must waste alignment-1 bytes.
         // To ensure we can do this, we request size+alignment bytes.
         // This shouldn't be so bad: untouched pages won't actually be allocated.
-        let aligned_size =
+        let align_rounded_size =
             NonZeroUsize::new(size + alignment).expect("BUG: alignment and size must be > 0");
 
         let mmap_pointer: *mut c_void;
         unsafe {
             mmap_pointer = nix::sys::mman::mmap(
                 None,
-                aligned_size,
+                align_rounded_size,
                 ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
                 MapFlags::MAP_ANONYMOUS | MapFlags::MAP_PRIVATE,
                 0,
@@ -112,15 +112,49 @@ impl MmapAligned {
             )?;
         }
 
-        let allocation = Self {
-            mmap_pointer,
-            aligned_size: aligned_size.get(),
-        };
-        let aligned_pointer = allocation.get_aligned_mut(alignment);
-        let allocation_end = mmap_pointer as usize + aligned_size.get();
+        // calculate the aligned block
+        let aligned_pointer = align_pointer_value(alignment, mmap_pointer as usize) as *mut c_void;
+        let allocation_end = mmap_pointer as usize + align_rounded_size.get();
         assert!(aligned_pointer as usize + size <= allocation_end);
 
-        Ok(allocation)
+        let unaligned_below_size = aligned_pointer as usize - mmap_pointer as usize;
+        let aligned_end = aligned_pointer as usize + size;
+        let unaligned_above_size = allocation_end - aligned_end;
+        // println!(
+        //     "mmap_pointer:0x{:x} - unaligned_below_end:0x{:x}; aligned_pointer:0x{:x} - aligned_end:0x{:x}; unaligned_above_end:0x{:x}",
+        //     mmap_pointer as usize,
+        //     mmap_pointer as usize + unaligned_below_size,
+        //     aligned_pointer as usize,
+        //     aligned_end,
+        //     aligned_end + unaligned_above_size,
+        // );
+
+        // if there is an unused section BELOW the allocation: unmap it
+        if aligned_pointer != mmap_pointer {
+            let unaligned_size = aligned_pointer as usize - mmap_pointer as usize;
+            unsafe {
+                nix::sys::mman::munmap(mmap_pointer, unaligned_size)
+                    .expect("BUG: munmap must succeed");
+            }
+        }
+
+        // if there is an unused section ABOVE the allocation: unmap it
+        if unaligned_above_size != 0 {
+            unsafe {
+                nix::sys::mman::munmap(aligned_end as *mut c_void, unaligned_above_size)
+                    .expect("BUG: munmap must succeed");
+            }
+        }
+
+        assert_eq!(
+            unaligned_below_size + unaligned_above_size + size,
+            align_rounded_size.get()
+        );
+
+        Ok(Self {
+            mmap_pointer: aligned_pointer,
+            size,
+        })
     }
 
     fn get_aligned_mut(&self, alignment: usize) -> *mut c_void {
@@ -130,13 +164,15 @@ impl MmapAligned {
 
 impl Drop for MmapAligned {
     fn drop(&mut self) {
-        println!(
-            "dropping mmap pointer={:x?} len={}...",
-            self.mmap_pointer, self.aligned_size
-        );
+        // println!(
+        //     "dropping mmap pointer=0x{:x?} len={} end=0x{:x}...",
+        //     self.mmap_pointer,
+        //     self.size,
+        //     self.mmap_pointer as usize + self.size
+        // );
 
         unsafe {
-            nix::sys::mman::munmap(self.mmap_pointer.cast::<c_void>(), self.aligned_size)
+            nix::sys::mman::munmap(self.mmap_pointer.cast::<c_void>(), self.size)
                 .expect("BUG: munmap should not fail");
         }
     }
@@ -242,19 +278,26 @@ mod test {
     fn test_mmap_aligned() {
         const ONE_GIB: usize = 1 << 30;
         const ONE_MIB: usize = 1 << 20;
-        let aligned_alloc = MmapAligned::new(ONE_GIB, ONE_MIB).unwrap();
-        let aligned_pointer = aligned_alloc.get_aligned_mut(ONE_GIB);
 
-        // check that we can write to the slice
-        let slice: &mut [u64];
-        unsafe {
-            slice = slice::from_raw_parts_mut(aligned_pointer.cast::<u64>(), ONE_MIB / 8);
+        // repeat a few times to try to trigger bad behavior
+        let mut v = Vec::new();
+        for _ in 0..10 {
+            let aligned_alloc = MmapAligned::new(ONE_GIB, ONE_MIB).unwrap();
+            let aligned_pointer = aligned_alloc.get_aligned_mut(ONE_GIB);
+
+            // check that we can write to the slice
+            let slice: &mut [u64];
+            unsafe {
+                slice = slice::from_raw_parts_mut(aligned_pointer.cast::<u64>(), ONE_MIB / 8);
+            }
+            slice[0] = 0x42;
+            slice[slice.len() - 1] = 0x42;
+            assert_eq!(0x42, slice[0]);
+            assert_eq!(0, slice[1]);
+            assert_eq!(0, slice[slice.len() - 2]);
+            assert_eq!(0x42, slice[slice.len() - 1]);
+
+            v.push(aligned_alloc);
         }
-        slice[0] = 0x42;
-        slice[slice.len() - 1] = 0x42;
-        assert_eq!(0x42, slice[0]);
-        assert_eq!(0, slice[1]);
-        assert_eq!(0, slice[slice.len() - 2]);
-        assert_eq!(0x42, slice[slice.len() - 1]);
     }
 }
