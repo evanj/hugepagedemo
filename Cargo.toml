@@ -17,3 +17,5 @@ memory-stats = "1"
 nix = {version="0", features=["mman"]}
 rand = "0"
 rand_xoshiro = "0"
+lazy_static = "1"
+regex = "1"

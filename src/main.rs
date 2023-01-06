@@ -1,12 +1,19 @@
-use core::slice;
 use memory_stats::memory_stats;
 use nix::sys::mman::{MapFlags, ProtFlags};
 use rand::distributions::Distribution;
 use rand::{distributions::Uniform, RngCore, SeedableRng};
 use std::error::Error;
+#[cfg(target_os = "linux")]
+use std::fs::File;
+#[cfg(target_os = "linux")]
+use std::io::Read;
 use std::num::NonZeroUsize;
 use std::os::raw::c_void;
+use std::slice;
 use std::time::Instant;
+#[cfg(any(test, target_os = "linux"))]
+#[macro_use]
+extern crate lazy_static;
 
 #[cfg(target_os = "linux")]
 use nix::sys::mman::MmapAdvise;
@@ -14,6 +21,10 @@ use nix::sys::mman::MmapAdvise;
 use nix::unistd::SysconfVar;
 
 const FILLED: u64 = 0x42;
+
+// See: https://www.kernel.org/doc/Documentation/vm/transhuge.txt
+#[cfg(target_os = "linux")]
+const HUGEPAGE_ENABLED_PATH: &str = "/sys/kernel/mm/transparent_hugepage/enabled";
 
 fn main() -> Result<(), Box<dyn Error>> {
     const TEST_SIZE_GIB: usize = 4;
@@ -43,6 +54,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         humanunits::bytes_string(mem_after.physical_mem - mem_before.physical_mem)
     );
     drop(v);
+
+    print_hugepage_setting_on_linux()?;
 
     let mem_before = memory_stats().unwrap();
     let start = Instant::now();
@@ -237,6 +250,78 @@ fn touch_pages(s: &mut [u64]) {
     }
 }
 
+#[cfg(any(test, target_os = "linux"))]
+#[derive(PartialEq, Eq, Debug)]
+enum HugepageSetting {
+    Always,
+    MAdvise,
+    Never,
+}
+
+#[cfg(any(test, target_os = "linux"))]
+impl HugepageSetting {
+    fn from_bytes(input: &[u8]) -> Result<Self, String> {
+        match input {
+            b"always" => Ok(Self::Always),
+            b"madvise" => Ok(Self::MAdvise),
+            b"never" => Ok(Self::Never),
+            _ => Err(format!(
+                "unknown transparent_hugepage setting {}",
+                String::from_utf8_lossy(input)
+            )),
+        }
+    }
+}
+
+#[cfg(any(test, target_os = "linux"))]
+impl std::fmt::Display for HugepageSetting {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::Always => "always",
+            Self::MAdvise => "madvise",
+            Self::Never => "never",
+        };
+        write!(f, "{s}")
+    }
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn parse_hugepage_enabled(input: &[u8]) -> Result<HugepageSetting, String> {
+    lazy_static! {
+        static ref RE: regex::bytes::Regex = regex::bytes::Regex::new(r#"\[([^\]]+)\]"#).unwrap();
+    }
+
+    let string_matches = RE.captures(input);
+    if string_matches.is_none() {
+        return Err(format!(
+            "could not match hugepages input: {}",
+            String::from_utf8_lossy(input)
+        ));
+    }
+    let matched = string_matches.unwrap().get(1).unwrap();
+
+    HugepageSetting::from_bytes(matched.as_bytes())
+}
+
+#[cfg(not(target_os = "linux"))]
+#[allow(clippy::unnecessary_wraps)]
+const fn print_hugepage_setting_on_linux() -> Result<(), Box<dyn Error>> {
+    // Do nothing if not on Linux
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn print_hugepage_setting_on_linux() -> Result<(), Box<dyn Error>> {
+    let mut f = File::open(HUGEPAGE_ENABLED_PATH)?;
+    let mut v = Vec::new();
+    f.read_to_end(&mut v)?;
+
+    let hugepage_setting = parse_hugepage_enabled(&v)?;
+    println!("transparent_hugepage setting: {hugepage_setting}");
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -281,5 +366,17 @@ mod test {
         assert_eq!(0, slice[1]);
         assert_eq!(0, slice[slice.len() - 2]);
         assert_eq!(0x42, slice[slice.len() - 1]);
+    }
+
+    #[test]
+    fn test_parse_hugepage() {
+        assert_eq!(
+            HugepageSetting::MAdvise,
+            parse_hugepage_enabled(b"always [madvise] never\n").unwrap()
+        );
+        assert_eq!(
+            HugepageSetting::Never,
+            parse_hugepage_enabled(b"always madvise [never]\n").unwrap()
+        );
     }
 }
