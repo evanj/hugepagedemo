@@ -3,28 +3,32 @@ use nix::sys::mman::{MapFlags, ProtFlags};
 use rand::distributions::Distribution;
 use rand::{distributions::Uniform, RngCore, SeedableRng};
 use std::error::Error;
-#[cfg(target_os = "linux")]
-use std::fs::File;
-#[cfg(target_os = "linux")]
-use std::io::Read;
 use std::num::NonZeroUsize;
 use std::os::raw::c_void;
 use std::slice;
 use std::time::Instant;
+
 #[cfg(any(test, target_os = "linux"))]
 #[macro_use]
 extern crate lazy_static;
 
+mod anyos_hugepages;
+
 #[cfg(target_os = "linux")]
-use nix::sys::mman::MmapAdvise;
-#[cfg(any(test, target_os = "linux"))]
-use nix::unistd::SysconfVar;
+mod linux_hugepages;
+#[cfg(target_os = "linux")]
+use linux_hugepages::madvise_hugepages_on_linux;
+#[cfg(target_os = "linux")]
+use linux_hugepages::print_hugepage_setting_on_linux;
+
+#[cfg(not(target_os = "linux"))]
+mod notlinux_hugepages;
+#[cfg(not(target_os = "linux"))]
+use notlinux_hugepages::madvise_hugepages_on_linux;
+#[cfg(not(target_os = "linux"))]
+use notlinux_hugepages::print_hugepage_setting_on_linux;
 
 const FILLED: u64 = 0x42;
-
-// See: https://www.kernel.org/doc/Documentation/vm/transhuge.txt
-#[cfg(target_os = "linux")]
-const HUGEPAGE_ENABLED_PATH: &str = "/sys/kernel/mm/transparent_hugepage/enabled";
 
 fn main() -> Result<(), Box<dyn Error>> {
     const TEST_SIZE_GIB: usize = 4;
@@ -171,7 +175,7 @@ impl<'a> MmapU64Slice<'a> {
             _allocation: allocation,
             slice,
         };
-        m.madvise_hugepages_on_linux();
+        madvise_hugepages_on_linux(m.slice);
 
         let (mmap_pointer, _) = m.mmap_parts();
         let ptr_usize = mmap_pointer as usize;
@@ -181,26 +185,6 @@ impl<'a> MmapU64Slice<'a> {
             ptr_usize & HUGE_1GIB_MASK == 0
         );
         Ok(m)
-    }
-
-    #[cfg(target_os = "linux")]
-    fn madvise_hugepages_on_linux(&mut self) {
-        let (mmap_pointer, mmap_len) = self.mmap_parts();
-        let advise_flags = MmapAdvise::MADV_HUGEPAGE;
-
-        unsafe {
-            nix::sys::mman::madvise(mmap_pointer.cast::<c_void>(), mmap_len, advise_flags)
-                .expect("BUG: madvise must succeed");
-        }
-
-        touch_pages(self.slice);
-    }
-
-    // allow unused_self because it is used on Linux
-    #[cfg(not(target_os = "linux"))]
-    #[allow(clippy::unused_self)]
-    fn madvise_hugepages_on_linux(&mut self) {
-        // Do nothing if not on Linux
     }
 
     fn slice(&self) -> &[u64] {
@@ -236,103 +220,9 @@ fn rnd_accesses(rng: &mut dyn RngCore, data: &[u64]) {
     );
 }
 
-#[cfg(any(test, target_os = "linux"))]
-fn touch_pages(s: &mut [u64]) {
-    let page_size = nix::unistd::sysconf(SysconfVar::PAGE_SIZE)
-        .expect("BUG: sysconf(_SC_PAGESIZE) must work")
-        .expect("BUG: page size must not be None");
-    println!("touch_pages with page_size={page_size}");
-
-    // write a zero every stride elements, which should fault every page
-    let stride = page_size as usize / 8;
-    for index in (0..s.len()).step_by(stride) {
-        s[index] = 0;
-    }
-}
-
-#[cfg(any(test, target_os = "linux"))]
-#[derive(PartialEq, Eq, Debug)]
-enum HugepageSetting {
-    Always,
-    MAdvise,
-    Never,
-}
-
-#[cfg(any(test, target_os = "linux"))]
-impl HugepageSetting {
-    fn from_bytes(input: &[u8]) -> Result<Self, String> {
-        match input {
-            b"always" => Ok(Self::Always),
-            b"madvise" => Ok(Self::MAdvise),
-            b"never" => Ok(Self::Never),
-            _ => Err(format!(
-                "unknown transparent_hugepage setting {}",
-                String::from_utf8_lossy(input)
-            )),
-        }
-    }
-}
-
-#[cfg(any(test, target_os = "linux"))]
-impl std::fmt::Display for HugepageSetting {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            Self::Always => "always",
-            Self::MAdvise => "madvise",
-            Self::Never => "never",
-        };
-        write!(f, "{s}")
-    }
-}
-
-#[cfg(any(test, target_os = "linux"))]
-fn parse_hugepage_enabled(input: &[u8]) -> Result<HugepageSetting, String> {
-    lazy_static! {
-        static ref RE: regex::bytes::Regex = regex::bytes::Regex::new(r#"\[([^\]]+)\]"#).unwrap();
-    }
-
-    let string_matches = RE.captures(input);
-    if string_matches.is_none() {
-        return Err(format!(
-            "could not match hugepages input: {}",
-            String::from_utf8_lossy(input)
-        ));
-    }
-    let matched = string_matches.unwrap().get(1).unwrap();
-
-    HugepageSetting::from_bytes(matched.as_bytes())
-}
-
-#[cfg(not(target_os = "linux"))]
-#[allow(clippy::unnecessary_wraps)]
-const fn print_hugepage_setting_on_linux() -> Result<(), Box<dyn Error>> {
-    // Do nothing if not on Linux
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn print_hugepage_setting_on_linux() -> Result<(), Box<dyn Error>> {
-    let mut f = File::open(HUGEPAGE_ENABLED_PATH)?;
-    let mut v = Vec::new();
-    f.read_to_end(&mut v)?;
-
-    let hugepage_setting = parse_hugepage_enabled(&v)?;
-    println!("transparent_hugepage setting: {hugepage_setting}");
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
-
-    #[test]
-    fn test_touch_pages() {
-        // just tests that it does not crash
-        const SIZE: usize = 1024 * 1024;
-        let mut v: Vec<u64> = vec![0; SIZE];
-        touch_pages(&mut v);
-    }
 
     #[test]
     fn test_align_pointer_value() {
@@ -366,17 +256,5 @@ mod test {
         assert_eq!(0, slice[1]);
         assert_eq!(0, slice[slice.len() - 2]);
         assert_eq!(0x42, slice[slice.len() - 1]);
-    }
-
-    #[test]
-    fn test_parse_hugepage() {
-        assert_eq!(
-            HugepageSetting::MAdvise,
-            parse_hugepage_enabled(b"always [madvise] never\n").unwrap()
-        );
-        assert_eq!(
-            HugepageSetting::Never,
-            parse_hugepage_enabled(b"always madvise [never]\n").unwrap()
-        );
     }
 }
