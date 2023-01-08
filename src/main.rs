@@ -20,6 +20,8 @@ mod linux_hugepages;
 use linux_hugepages::madvise_hugepages_on_linux;
 #[cfg(target_os = "linux")]
 use linux_hugepages::print_hugepage_setting_on_linux;
+#[cfg(target_os = "linux")]
+use linux_hugepages::read_page_size;
 
 #[cfg(not(target_os = "linux"))]
 mod notlinux_hugepages;
@@ -27,6 +29,8 @@ mod notlinux_hugepages;
 use notlinux_hugepages::madvise_hugepages_on_linux;
 #[cfg(not(target_os = "linux"))]
 use notlinux_hugepages::print_hugepage_setting_on_linux;
+#[cfg(not(target_os = "linux"))]
+use notlinux_hugepages::read_page_size;
 
 const FILLED: u64 = 0x42;
 
@@ -73,6 +77,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         "MmapSlice: alloc and filled {TEST_SIZE_GIB} GiB in {duration:?}; {}",
         humanunits::byte_rate_string(TEST_SIZE_BYTES, duration)
     );
+    let page_size = read_page_size(v.slice().as_ptr() as usize)?;
+    println!("  slice page size = {page_size}");
+
     rnd_accesses(&mut rng, v.slice());
     let mem_after = memory_stats().unwrap();
     println!(
@@ -81,6 +88,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         humanunits::bytes_string(mem_after.physical_mem),
         humanunits::bytes_string(mem_after.physical_mem - mem_before.physical_mem)
     );
+
+    // println!("sleeping ...");
+    // sleep(Duration::from_secs(60));
+    // println!("v[0]={}", v.slice()[0]);
+
     drop(v);
 
     Ok(())
