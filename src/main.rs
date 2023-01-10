@@ -6,7 +6,8 @@ use std::error::Error;
 use std::num::NonZeroUsize;
 use std::os::raw::c_void;
 use std::slice;
-use std::time::Instant;
+use std::thread::sleep;
+use std::time::{Duration, Instant};
 
 #[cfg(any(test, target_os = "linux"))]
 #[macro_use]
@@ -34,70 +35,106 @@ use notlinux_hugepages::read_page_size;
 
 const FILLED: u64 = 0x42;
 
+#[derive(argh::FromArgs)]
+/// Control the options for the huge page demo.
+struct HugePageDemoOptions {
+    /// disable using a normal Vec, which uses malloc.
+    #[argh(switch)]
+    do_not_vec: bool,
+
+    /// disable using mmap with madvise.
+    #[argh(switch)]
+    do_not_mmap: bool,
+
+    /// sleep for 60 seconds before dropping the mmap, to allow examining the process state.
+    #[argh(switch)]
+    sleep_before_drop: bool,
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     const TEST_SIZE_GIB: usize = 4;
     const TEST_SIZE_BYTES: usize = TEST_SIZE_GIB * 1024 * 1024 * 1024;
     const TEST_SIZE_U64: usize = TEST_SIZE_BYTES / 8;
+
+    let options: HugePageDemoOptions = argh::from_env();
 
     // the rand book suggests Xoshiro256Plus is fast and pretty good:
     // https://rust-random.github.io/book/guide-rngs.html
     let mut rng = rand_xoshiro::Xoshiro256Plus::from_entropy();
 
     let mem_before = memory_stats().unwrap();
-    let start = Instant::now();
-    let mut v = Vec::with_capacity(TEST_SIZE_U64);
-    v.resize(TEST_SIZE_U64, FILLED);
-    let end = Instant::now();
-    let duration = end - start;
-    println!(
-        "Vec: alloc and filled {TEST_SIZE_GIB} GiB in {duration:?}; {}",
-        humanunits::byte_rate_string(TEST_SIZE_BYTES, duration)
-    );
-    rnd_accesses(&mut rng, &v);
-    let mem_after = memory_stats().unwrap();
-    println!(
-        "RSS before: {}; RSS after: {}; diff: {}\n",
-        humanunits::bytes_string(mem_before.physical_mem),
-        humanunits::bytes_string(mem_after.physical_mem),
-        humanunits::bytes_string(mem_after.physical_mem - mem_before.physical_mem)
-    );
-    drop(v);
-
-    print_hugepage_setting_on_linux()?;
-
-    let mem_before = memory_stats().unwrap();
-    let start = Instant::now();
-    let mut v = MmapU64Slice::new_zero(TEST_SIZE_U64)?;
-    for value in v.slice_mut().iter_mut() {
-        *value = FILLED;
+    if !options.do_not_vec {
+        let start = Instant::now();
+        let mut v = Vec::with_capacity(TEST_SIZE_U64);
+        v.resize(TEST_SIZE_U64, FILLED);
+        let end = Instant::now();
+        let duration = end - start;
+        println!(
+            "Vec: alloc and filled {TEST_SIZE_GIB} GiB in {duration:?}; {}",
+            humanunits::byte_rate_string(TEST_SIZE_BYTES, duration)
+        );
+        rnd_accesses(&mut rng, &v);
+        let mem_after = memory_stats().unwrap();
+        println!(
+            "RSS before: {}; RSS after: {}; diff: {}\n",
+            humanunits::bytes_string(mem_before.physical_mem),
+            humanunits::bytes_string(mem_after.physical_mem),
+            humanunits::bytes_string(mem_after.physical_mem - mem_before.physical_mem)
+        );
+        drop(v);
     }
-    let end = Instant::now();
-    let duration = end - start;
-    println!(
-        "MmapSlice: alloc and filled {TEST_SIZE_GIB} GiB in {duration:?}; {}",
-        humanunits::byte_rate_string(TEST_SIZE_BYTES, duration)
-    );
-    let page_size = read_page_size(v.slice().as_ptr() as usize)?;
-    println!("  slice page size = {page_size}");
 
-    rnd_accesses(&mut rng, v.slice());
-    let mem_after = memory_stats().unwrap();
-    println!(
-        "RSS before: {}; RSS after: {}; diff: {}",
-        humanunits::bytes_string(mem_before.physical_mem),
-        humanunits::bytes_string(mem_after.physical_mem),
-        humanunits::bytes_string(mem_after.physical_mem - mem_before.physical_mem)
-    );
+    if !options.do_not_mmap {
+        print_hugepage_setting_on_linux()?;
 
-    // println!("sleeping ...");
-    // sleep(Duration::from_secs(60));
-    // println!("v[0]={}", v.slice()[0]);
+        let mem_before = memory_stats().unwrap();
+        let start = Instant::now();
+        let mut v = MmapU64Slice::new_zero(TEST_SIZE_U64)?;
+        for value in v.slice_mut().iter_mut() {
+            *value = FILLED;
+        }
+        let end = Instant::now();
+        let duration = end - start;
+        println!(
+            "MmapSlice: alloc and filled {TEST_SIZE_GIB} GiB in {duration:?}; {}",
+            humanunits::byte_rate_string(TEST_SIZE_BYTES, duration)
+        );
+        let page_size = read_page_size(v.slice().as_ptr() as usize)?;
+        println!("  slice page size = {page_size}");
 
-    drop(v);
+        rnd_accesses(&mut rng, v.slice());
+        let mem_after = memory_stats().unwrap();
+        println!(
+            "RSS before: {}; RSS after: {}; diff: {}",
+            humanunits::bytes_string(mem_before.physical_mem),
+            humanunits::bytes_string(mem_after.physical_mem),
+            humanunits::bytes_string(mem_after.physical_mem - mem_before.physical_mem)
+        );
+
+        if options.sleep_before_drop {
+            const SLEEP_DURATION: Duration = Duration::from_secs(60);
+            println!("sleeping ...");
+            sleep(SLEEP_DURATION);
+            println!("v[0]={}", v.slice()[0]);
+        }
+
+        drop(v);
+
+        let mem_after_drop = memory_stats().unwrap();
+        println!(
+            "After drop: RSS before: {}; RSS after: {}; diff: {}",
+            humanunits::bytes_string(mem_before.physical_mem),
+            humanunits::bytes_string(mem_after_drop.physical_mem),
+            humanunits::bytes_string(mem_after_drop.physical_mem - mem_before.physical_mem)
+        );
+    }
 
     Ok(())
 }
 
+/// Allocates a memory region with mmap that is aligned with a specific alignment. This can be used
+/// for huge page alignment. It allocates a region of size + alignment, then munmaps the extra.
+/// Unfortunately, the Linux kernel seems to prefer returning
 struct MmapAligned {
     mmap_pointer: *mut c_void,
     size: usize,
@@ -124,9 +161,18 @@ impl MmapAligned {
             )?;
         }
 
-        // calculate the aligned block
-        let aligned_pointer = align_pointer_value(alignment, mmap_pointer as usize) as *mut c_void;
+        // Calculate the aligned block, preferring the HIGHEST aligned address,
+        // since the kernel seems to allocate consecutive allocations downward.
+        // This allows consecutive calls to mmap to be contiguous, which MIGHT
+        // allow the kernel to coalesce them into huge pages? Not sure.
         let allocation_end = mmap_pointer as usize + align_rounded_size.get();
+        let aligned_pointer =
+            align_pointer_value_down(alignment, allocation_end - size) as *mut c_void;
+        // alternative of taking the lowest aligned address
+        // let aligned_pointer =
+        //     align_pointer_value_up(alignment, mmap_pointer as usize) as *mut c_void;
+
+        assert!(mmap_pointer <= aligned_pointer);
         assert!(aligned_pointer as usize + size <= allocation_end);
 
         let unaligned_below_size = aligned_pointer as usize - mmap_pointer as usize;
@@ -170,7 +216,7 @@ impl MmapAligned {
     }
 
     fn get_aligned_mut(&self, alignment: usize) -> *mut c_void {
-        align_pointer_value(alignment, self.mmap_pointer as usize) as *mut c_void
+        align_pointer_value_up(alignment, self.mmap_pointer as usize) as *mut c_void
     }
 }
 
@@ -190,13 +236,22 @@ impl Drop for MmapAligned {
     }
 }
 
-fn align_pointer_value(alignment: usize, pointer_value: usize) -> usize {
+fn align_pointer_value_up(alignment: usize, pointer_value: usize) -> usize {
     // see bit hacks to check if power of two:
     // https://graphics.stanford.edu/~seander/bithacks.html#DetermineIfPowerOf2
     assert_eq!(0, (alignment & (alignment - 1)));
     // round pointer_value up to nearest alignment; assumes there is sufficient space
     let alignment_mask = !(alignment - 1);
     (pointer_value + (alignment - 1)) & alignment_mask
+}
+
+fn align_pointer_value_down(alignment: usize, pointer_value: usize) -> usize {
+    // see bit hacks to check if power of two:
+    // https://graphics.stanford.edu/~seander/bithacks.html#DetermineIfPowerOf2
+    assert_eq!(0, (alignment & (alignment - 1)));
+    // round pointer_value down to nearest alignment; assumes there is sufficient space
+    let alignment_mask = !(alignment - 1);
+    pointer_value & alignment_mask
 }
 
 struct MmapU64Slice<'a> {
@@ -263,7 +318,7 @@ fn rnd_accesses(rng: &mut dyn RngCore, data: &[u64]) {
     let end = Instant::now();
     let duration = end - start;
     println!(
-        "{NUM_ACCESSES} in {duration:?}; {:.1} accesses/sec",
+        "{NUM_ACCESSES} accesses in {duration:?}; {:.1} accesses/sec",
         NUM_ACCESSES as f64 / duration.as_secs_f64()
     );
 }
@@ -277,13 +332,33 @@ mod test {
         const ONE_GIB: usize = 1 << 30;
         const SEVEN_GIB: usize = 7 * ONE_GIB;
         const EIGHT_GIB: usize = 8 * ONE_GIB;
-        assert_eq!(SEVEN_GIB, align_pointer_value(ONE_GIB, SEVEN_GIB));
-        assert_eq!(EIGHT_GIB, align_pointer_value(ONE_GIB, SEVEN_GIB + 1));
+        assert_eq!(SEVEN_GIB, align_pointer_value_up(ONE_GIB, SEVEN_GIB));
+        assert_eq!(EIGHT_GIB, align_pointer_value_up(ONE_GIB, SEVEN_GIB + 1));
         assert_eq!(
             EIGHT_GIB,
-            align_pointer_value(ONE_GIB, SEVEN_GIB + (ONE_GIB - 1))
+            align_pointer_value_up(ONE_GIB, SEVEN_GIB + (ONE_GIB - 1))
         );
-        assert_eq!(EIGHT_GIB, align_pointer_value(ONE_GIB, SEVEN_GIB + ONE_GIB));
+        assert_eq!(
+            EIGHT_GIB,
+            align_pointer_value_up(ONE_GIB, SEVEN_GIB + ONE_GIB)
+        );
+    }
+
+    #[test]
+    fn test_align_pointer_value_down() {
+        const ONE_GIB: usize = 1 << 30;
+        const SEVEN_GIB: usize = 7 * ONE_GIB;
+        const EIGHT_GIB: usize = 8 * ONE_GIB;
+        assert_eq!(SEVEN_GIB, align_pointer_value_down(ONE_GIB, SEVEN_GIB));
+        assert_eq!(SEVEN_GIB, align_pointer_value_down(ONE_GIB, SEVEN_GIB + 1));
+        assert_eq!(
+            SEVEN_GIB,
+            align_pointer_value_down(ONE_GIB, SEVEN_GIB + (ONE_GIB - 1))
+        );
+        assert_eq!(
+            EIGHT_GIB,
+            align_pointer_value_down(ONE_GIB, SEVEN_GIB + ONE_GIB)
+        );
     }
 
     #[test]

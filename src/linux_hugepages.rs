@@ -66,9 +66,13 @@ impl PagemapEntry {
     }
 }
 
+/// Returns the best guess at the page size for the address pointed at by p.
+/// This needs to run as root to work correctly. This function will print
+/// detailed debugging output.
 pub fn read_page_size(p: usize) -> Result<usize, std::io::Error> {
     const PAGEMAP_PATH: &str = "/proc/self/pagemap";
     const KPAGEFLAGS_PATH: &str = "/proc/kpageflags";
+
     // KPF_THP https://github.com/torvalds/linux/blob/master/include/uapi/linux/kernel-page-flags.h
     const KPAGEFLAGS_THP_BIT: u64 = 22;
 
@@ -100,11 +104,41 @@ pub fn read_page_size(p: usize) -> Result<usize, std::io::Error> {
 
     let kpageflag_entry = u64::from_le_bytes(entry_bytes);
     if (kpageflag_entry & (1 << KPAGEFLAGS_THP_BIT)) == 0 {
-        println!("  kpageflags does not have THP bit set; not a huge page?");
-    } else {
-        println!("  kpageflags THP bit is set: is a huge page!");
+        println!("  kpageflags does not have THP bit set; not a huge page");
+        return Ok(page_size);
     }
 
-    // TODO: figure out how we can figure out the size of the huge page?
-    Ok(page_size)
+    println!("  kpageflags THP bit is set: is a huge page!");
+
+    // Read the size of the huge page from /sys/kernel/mm/transparent_hugepage/hpage_pmd_size
+    read_hugepage_size()
+}
+
+fn read_hugepage_size() -> Result<usize, std::io::Error> {
+    const HPAGE_PMD_SIZE_PATH: &str = "/sys/kernel/mm/transparent_hugepage/hpage_pmd_size";
+    let mut hpage_size_string = std::fs::read_to_string(HPAGE_PMD_SIZE_PATH)?;
+    // always terminated by \n
+    if hpage_size_string.ends_with('\n') {
+        hpage_size_string.pop();
+    }
+
+    let hpage_size_result = hpage_size_string.parse::<usize>();
+    match hpage_size_result {
+        Err(err) => {
+            let msg = format!("  failed to parse {HPAGE_PMD_SIZE_PATH}: {err:?}");
+            Err(std::io::Error::new(std::io::ErrorKind::Other, msg))
+        }
+        Ok(hpage_size) => Ok(hpage_size),
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_read_hugepage_size() {
+        // this is not always true, but true for x86_64 and current aarch64 platforms
+        assert_eq!(2048 * 1024, read_hugepage_size().unwrap());
+    }
 }
