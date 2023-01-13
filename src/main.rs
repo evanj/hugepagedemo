@@ -38,17 +38,21 @@ const FILLED: u64 = 0x42;
 #[derive(argh::FromArgs)]
 /// Control the options for the huge page demo.
 struct HugePageDemoOptions {
-    /// disable using a normal Vec, which uses malloc.
-    #[argh(switch)]
-    do_not_vec: bool,
-
     /// disable using mmap with madvise.
-    #[argh(switch)]
-    do_not_mmap: bool,
+    #[argh(option, default = "RunMode::All")]
+    run_mode: RunMode,
 
     /// sleep for 60 seconds before dropping the mmap, to allow examining the process state.
     #[argh(switch)]
     sleep_before_drop: bool,
+}
+
+#[derive(strum::EnumString, Eq, PartialEq)]
+enum RunMode {
+    All,
+    VecOnly,
+    MmapOnly,
+    MmapHugeTLB1GiBOnly,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -63,7 +67,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut rng = rand_xoshiro::Xoshiro256Plus::from_entropy();
 
     let mem_before = memory_stats().unwrap();
-    if !options.do_not_vec {
+    if options.run_mode == RunMode::All || options.run_mode == RunMode::VecOnly {
         let start = Instant::now();
         let mut v = Vec::with_capacity(TEST_SIZE_U64);
         v.resize(TEST_SIZE_U64, FILLED);
@@ -84,11 +88,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         drop(v);
     }
 
-    if !options.do_not_mmap {
+    if options.run_mode == RunMode::All || options.run_mode == RunMode::MmapOnly {
         print_hugepage_setting_on_linux()?;
 
         let mem_before = memory_stats().unwrap();
         let start = Instant::now();
+
         let mut v = MmapU64Slice::new_zero(TEST_SIZE_U64)?;
         for value in v.slice_mut().iter_mut() {
             *value = FILLED;
@@ -97,6 +102,61 @@ fn main() -> Result<(), Box<dyn Error>> {
         let duration = end - start;
         println!(
             "MmapSlice: alloc and filled {TEST_SIZE_GIB} GiB in {duration:?}; {}",
+            humanunits::byte_rate_string(TEST_SIZE_BYTES, duration)
+        );
+        let page_size = read_page_size(v.slice().as_ptr() as usize)?;
+        println!("  slice page size = {page_size}");
+
+        rnd_accesses(&mut rng, v.slice());
+        let mem_after = memory_stats().unwrap();
+        println!(
+            "RSS before: {}; RSS after: {}; diff: {}",
+            humanunits::bytes_string(mem_before.physical_mem),
+            humanunits::bytes_string(mem_after.physical_mem),
+            humanunits::bytes_string(mem_after.physical_mem - mem_before.physical_mem)
+        );
+
+        if options.sleep_before_drop {
+            const SLEEP_DURATION: Duration = Duration::from_secs(60);
+            println!("sleeping ...");
+            sleep(SLEEP_DURATION);
+            println!("v[0]={}", v.slice()[0]);
+        }
+
+        drop(v);
+
+        let mem_after_drop = memory_stats().unwrap();
+        println!(
+            "After drop: RSS before: {}; RSS after: {}; diff: {}",
+            humanunits::bytes_string(mem_before.physical_mem),
+            humanunits::bytes_string(mem_after_drop.physical_mem),
+            humanunits::bytes_string(mem_after_drop.physical_mem - mem_before.physical_mem)
+        );
+    }
+
+    if options.run_mode == RunMode::All || options.run_mode == RunMode::MmapHugeTLB1GiBOnly {
+        let mem_before = memory_stats().unwrap();
+        let start = Instant::now();
+        let mut v = match MmapU64SliceUnaligned::new_zero_flags(
+            TEST_SIZE_U64,
+            MapFlags::MAP_HUGETLB | MapFlags::MAP_HUGE_1GB,
+        ) {
+            Ok(v) => v,
+            Err(nix::Error::ENOMEM) => {
+                println!("ENOMEM: try reserving huge pages with: echo {} | sudo tee /sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages", TEST_SIZE_U64*8/(1<<30));
+                return Err(Box::from(nix::Error::ENOMEM));
+            }
+            Err(err) => {
+                return Err(Box::from(err));
+            }
+        };
+        for value in v.slice_mut().iter_mut() {
+            *value = FILLED;
+        }
+        let end = Instant::now();
+        let duration = end - start;
+        println!(
+            "hugetlb 1GiB MmapSlice: alloc and filled {TEST_SIZE_GIB} GiB in {duration:?}; {}",
             humanunits::byte_rate_string(TEST_SIZE_BYTES, duration)
         );
         let page_size = read_page_size(v.slice().as_ptr() as usize)?;
@@ -142,7 +202,17 @@ struct MmapAligned {
 
 impl MmapAligned {
     // argument order is the same as aligned_alloc.
+    #[cfg(test)]
     fn new(alignment: usize, size: usize) -> Result<Self, nix::errno::Errno> {
+        Self::new_flags(alignment, size, MapFlags::empty())
+    }
+
+    // argument order is the same as aligned_alloc.
+    fn new_flags(
+        alignment: usize,
+        size: usize,
+        flags: MapFlags,
+    ) -> Result<Self, nix::errno::Errno> {
         // worse case alignment: mmap returns 1 byte off the alignment, we must waste alignment-1 bytes.
         // To ensure we can do this, we request size+alignment bytes.
         // This shouldn't be so bad: untouched pages won't actually be allocated.
@@ -155,7 +225,7 @@ impl MmapAligned {
                 None,
                 align_rounded_size,
                 ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
-                MapFlags::MAP_ANONYMOUS | MapFlags::MAP_PRIVATE,
+                MapFlags::MAP_ANONYMOUS | MapFlags::MAP_PRIVATE | flags,
                 0,
                 0,
             )?;
@@ -236,6 +306,51 @@ impl Drop for MmapAligned {
     }
 }
 
+/// Allocates a memory region with mmap.
+struct MmapRegion {
+    mmap_pointer: *mut c_void,
+    size: usize,
+}
+
+impl MmapRegion {
+    fn new_flags(size: usize, flags: MapFlags) -> Result<Self, nix::errno::Errno> {
+        let mmap_pointer: *mut c_void;
+        let non_zero_size = NonZeroUsize::new(size).expect("BUG: size must be > 0");
+        unsafe {
+            mmap_pointer = nix::sys::mman::mmap(
+                None,
+                non_zero_size,
+                ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
+                MapFlags::MAP_ANONYMOUS | MapFlags::MAP_PRIVATE | flags,
+                0,
+                0,
+            )?;
+        }
+
+        Ok(Self { mmap_pointer, size })
+    }
+
+    const fn get_mut(&self) -> *mut c_void {
+        self.mmap_pointer
+    }
+}
+
+impl Drop for MmapRegion {
+    fn drop(&mut self) {
+        println!(
+            "dropping mmap pointer=0x{:x?} len={} end=0x{:x}...",
+            self.mmap_pointer,
+            self.size,
+            self.mmap_pointer as usize + self.size
+        );
+
+        unsafe {
+            nix::sys::mman::munmap(self.mmap_pointer.cast::<c_void>(), self.size)
+                .expect("BUG: munmap should not fail");
+        }
+    }
+}
+
 fn align_pointer_value_up(alignment: usize, pointer_value: usize) -> usize {
     // see bit hacks to check if power of two:
     // https://graphics.stanford.edu/~seander/bithacks.html#DetermineIfPowerOf2
@@ -262,13 +377,18 @@ struct MmapU64Slice<'a> {
 
 impl<'a> MmapU64Slice<'a> {
     fn new_zero(items: usize) -> Result<Self, nix::errno::Errno> {
-        const HUGE_2MIB_MASK: usize = (2 << 20) - 1;
+        Self::new_zero_flags(items, MapFlags::empty())
+    }
+
+    fn new_zero_flags(items: usize, flags: MapFlags) -> Result<Self, nix::errno::Errno> {
+        const HUGE_2MIB_ALIGNMENT: usize = 2 << 20;
+        const HUGE_2MIB_MASK: usize = HUGE_2MIB_ALIGNMENT - 1;
         const HUGE_1GIB_ALIGNMENT: usize = 1 << 30;
         const HUGE_1GIB_MASK: usize = HUGE_1GIB_ALIGNMENT - 1;
 
         let mem_size = items * 8;
-        let allocation = MmapAligned::new(HUGE_1GIB_ALIGNMENT, mem_size)?;
-        let slice_pointer = allocation.get_aligned_mut(HUGE_1GIB_ALIGNMENT);
+        let allocation = MmapAligned::new_flags(HUGE_2MIB_ALIGNMENT, mem_size, flags)?;
+        let slice_pointer = allocation.get_aligned_mut(HUGE_2MIB_ALIGNMENT);
         let slice: &mut [u64];
         unsafe {
             slice = slice::from_raw_parts_mut(slice_pointer.cast::<u64>(), items);
@@ -279,6 +399,57 @@ impl<'a> MmapU64Slice<'a> {
             slice,
         };
         madvise_hugepages_on_linux(m.slice);
+
+        let (mmap_pointer, _) = m.mmap_parts();
+        let ptr_usize = mmap_pointer as usize;
+        println!(
+            "mmap aligned returned {mmap_pointer:x?}; aligned to 2MiB (0x{HUGE_2MIB_MASK:x})? {}; aligned to 1GiB (0x{HUGE_1GIB_MASK:x})? {}",
+            ptr_usize & HUGE_2MIB_MASK == 0,
+            ptr_usize & HUGE_1GIB_MASK == 0
+        );
+        Ok(m)
+    }
+
+    fn slice(&self) -> &[u64] {
+        self.slice
+    }
+
+    fn slice_mut(&mut self) -> &mut [u64] {
+        self.slice
+    }
+
+    fn mmap_parts(&mut self) -> (*mut u64, usize) {
+        let mmap_pointer = self.slice_mut().as_mut_ptr();
+        let mmap_len = self.slice.len() * 8;
+        (mmap_pointer, mmap_len)
+    }
+}
+
+struct MmapU64SliceUnaligned<'a> {
+    // MmapAligned unmaps the mapping using the Drop trait but is otherwise not read
+    _allocation: MmapRegion,
+    slice: &'a mut [u64],
+}
+
+impl<'a> MmapU64SliceUnaligned<'a> {
+    fn new_zero_flags(items: usize, flags: MapFlags) -> Result<Self, nix::errno::Errno> {
+        const HUGE_2MIB_ALIGNMENT: usize = 2 << 20;
+        const HUGE_2MIB_MASK: usize = HUGE_2MIB_ALIGNMENT - 1;
+        const HUGE_1GIB_ALIGNMENT: usize = 1 << 30;
+        const HUGE_1GIB_MASK: usize = HUGE_1GIB_ALIGNMENT - 1;
+
+        let mem_size = items * 8;
+        let allocation = MmapRegion::new_flags(mem_size, flags)?;
+        let slice_pointer = allocation.get_mut();
+        let slice: &mut [u64];
+        unsafe {
+            slice = slice::from_raw_parts_mut(slice_pointer.cast::<u64>(), items);
+        }
+
+        let mut m = Self {
+            _allocation: allocation,
+            slice,
+        };
 
         let (mmap_pointer, _) = m.mmap_parts();
         let ptr_usize = mmap_pointer as usize;

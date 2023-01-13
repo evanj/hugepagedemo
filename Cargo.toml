@@ -12,11 +12,12 @@ debug = true
 #rustflags = ["-C", "target-cpu=native"]
 
 [dependencies]
+argh = "0.1.9"
 humanunits = {git="https://github.com/evanj/humanunits"}
+lazy_static = "1"
 memory-stats = "1"
 nix = {version="0", features=["mman"]}
 rand = "0"
 rand_xoshiro = "0"
-lazy_static = "1"
 regex = "1"
-argh = "0.1.9"
+strum = { version = "0", features = ["derive"] }

@@ -15,7 +15,8 @@ all: aligned_alloc_demo
 		-D clippy::pedantic \
 		-A clippy::cast_precision_loss \
 		-A clippy::cast-sign-loss \
-		-A clippy::cast-possible-truncation
+		-A clippy::cast-possible-truncation \
+		-A clippy::too-many-lines
 
 	clang-format -i '-style={BasedOnStyle: Google, ColumnLimit: 100}' *.c
 
