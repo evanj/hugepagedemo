@@ -1,3 +1,4 @@
+use hugepagedemo::MmapOwner;
 use memory_stats::memory_stats;
 use nix::sys::mman::{MapFlags, ProtFlags};
 use rand::distributions::Distribution;
@@ -14,6 +15,8 @@ use std::time::{Duration, Instant};
 extern crate lazy_static;
 
 mod anyos_hugepages;
+mod mmaputils;
+use mmaputils::MmapRegion;
 
 #[cfg(target_os = "linux")]
 mod linux_hugepages;
@@ -195,12 +198,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 /// Allocates a memory region with mmap that is aligned with a specific alignment. This can be used
 /// for huge page alignment. It allocates a region of size + alignment, then munmaps the extra.
 /// Unfortunately, the Linux kernel seems to prefer returning
-struct MmapAligned {
-    mmap_pointer: *mut c_void,
-    size: usize,
+struct MmapHugeMadviseAligned {
+    region: MmapOwner,
 }
 
-impl MmapAligned {
+impl MmapHugeMadviseAligned {
     // argument order is the same as aligned_alloc.
     #[cfg(test)]
     fn new(alignment: usize, size: usize) -> Result<Self, nix::errno::Errno> {
@@ -280,77 +282,16 @@ impl MmapAligned {
         );
 
         Ok(Self {
-            mmap_pointer: aligned_pointer,
-            size,
+            region: MmapOwner::new(aligned_pointer, size),
         })
     }
 
-    fn get_aligned_mut(&self, alignment: usize) -> *mut c_void {
-        align_pointer_value_up(alignment, self.mmap_pointer as usize) as *mut c_void
-    }
-}
-
-impl Drop for MmapAligned {
-    fn drop(&mut self) {
-        // println!(
-        //     "dropping mmap pointer=0x{:x?} len={} end=0x{:x}...",
-        //     self.mmap_pointer,
-        //     self.size,
-        //     self.mmap_pointer as usize + self.size
-        // );
-
-        unsafe {
-            nix::sys::mman::munmap(self.mmap_pointer.cast::<c_void>(), self.size)
-                .expect("BUG: munmap should not fail");
-        }
-    }
-}
-
-/// Allocates a memory region with mmap.
-struct MmapRegion {
-    mmap_pointer: *mut c_void,
-    size: usize,
-}
-
-impl MmapRegion {
-    fn new_flags(size: usize, flags: MapFlags) -> Result<Self, nix::errno::Errno> {
-        let mmap_pointer: *mut c_void;
-        let non_zero_size = NonZeroUsize::new(size).expect("BUG: size must be > 0");
-        unsafe {
-            mmap_pointer = nix::sys::mman::mmap(
-                None,
-                non_zero_size,
-                ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
-                MapFlags::MAP_ANONYMOUS | MapFlags::MAP_PRIVATE | flags,
-                0,
-                0,
-            )?;
-        }
-
-        Ok(Self { mmap_pointer, size })
-    }
-
     const fn get_mut(&self) -> *mut c_void {
-        self.mmap_pointer
+        self.region.get_mut()
     }
 }
 
-impl Drop for MmapRegion {
-    fn drop(&mut self) {
-        println!(
-            "dropping mmap pointer=0x{:x?} len={} end=0x{:x}...",
-            self.mmap_pointer,
-            self.size,
-            self.mmap_pointer as usize + self.size
-        );
-
-        unsafe {
-            nix::sys::mman::munmap(self.mmap_pointer.cast::<c_void>(), self.size)
-                .expect("BUG: munmap should not fail");
-        }
-    }
-}
-
+#[cfg(test)]
 fn align_pointer_value_up(alignment: usize, pointer_value: usize) -> usize {
     // see bit hacks to check if power of two:
     // https://graphics.stanford.edu/~seander/bithacks.html#DetermineIfPowerOf2
@@ -371,7 +312,7 @@ fn align_pointer_value_down(alignment: usize, pointer_value: usize) -> usize {
 
 struct MmapU64Slice<'a> {
     // MmapAligned unmaps the mapping using the Drop trait but is otherwise not read
-    _allocation: MmapAligned,
+    _allocation: MmapHugeMadviseAligned,
     slice: &'a mut [u64],
 }
 
@@ -387,8 +328,8 @@ impl<'a> MmapU64Slice<'a> {
         const HUGE_1GIB_MASK: usize = HUGE_1GIB_ALIGNMENT - 1;
 
         let mem_size = items * 8;
-        let allocation = MmapAligned::new_flags(HUGE_2MIB_ALIGNMENT, mem_size, flags)?;
-        let slice_pointer = allocation.get_aligned_mut(HUGE_2MIB_ALIGNMENT);
+        let allocation = MmapHugeMadviseAligned::new_flags(HUGE_2MIB_ALIGNMENT, mem_size, flags)?;
+        let slice_pointer = allocation.get_mut();
         let slice: &mut [u64];
         unsafe {
             slice = slice::from_raw_parts_mut(slice_pointer.cast::<u64>(), items);
@@ -540,8 +481,8 @@ mod test {
         // repeat a few times to try to trigger bad behavior
         let mut v = Vec::new();
         for _ in 0..10 {
-            let aligned_alloc = MmapAligned::new(ONE_GIB, ONE_MIB).unwrap();
-            let aligned_pointer = aligned_alloc.get_aligned_mut(ONE_GIB);
+            let aligned_alloc = MmapHugeMadviseAligned::new(ONE_GIB, ONE_MIB).unwrap();
+            let aligned_pointer = aligned_alloc.get_mut();
 
             // check that we can write to the slice
             let slice: &mut [u64];
