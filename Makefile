@@ -11,7 +11,8 @@ all: aligned_alloc_demo
 	cargo clippy --all-targets --all-features -- \
 		-D warnings \
 		-D clippy::nursery \
-		-A clippy::option-if-let-else
+		-A clippy::option-if-let-else \
+		-D clippy::cargo
 
 	clang-format -i '-style={BasedOnStyle: Google, ColumnLimit: 100}' *.c
 

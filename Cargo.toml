@@ -3,6 +3,11 @@ name = "hugepagedemo"
 version = "0.1.0"
 edition = "2021"
 default-run = "hugepagedemo"
+description = "Demonstration of the performance impact of huge pages in the Linux kernel."
+license = "MIT"
+repository = "https://github.com/evanj/hugepagedemo"
+keywords = ["page", "hugepage", "madvise", "thp", "tlb"]
+categories = ["command-line-utilities"]
 
 [profile.release-nativecpu]
 inherits = "release"
