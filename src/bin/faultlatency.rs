@@ -1,8 +1,10 @@
 use hugepagedemo::MmapRegion;
+#[cfg(target_os = "linux")]
 use nix::sys::mman::MmapAdvise;
+#[cfg(target_os = "linux")]
+use std::ffi::c_void;
 use std::{
     error::Error,
-    ffi::c_void,
     time::{Duration, Instant},
 };
 use time::OffsetDateTime;
@@ -19,6 +21,8 @@ struct FaultLatencyOptions {
     test_interval: Duration,
 
     /// sleep duration between probing the different page sizes.
+    // allow(dead_code) for Mac OS X where the option is unused
+    #[allow(dead_code)]
     #[argh(
         option,
         default = "Duration::from_millis(100)",
@@ -80,29 +84,6 @@ fn fault_4kib() -> Result<FaultLatency, nix::errno::Errno> {
     ))
 }
 
-fn fault_2mib() -> Result<FaultLatency, nix::errno::Errno> {
-    const PAGE_2MIB: usize = 2 << 20;
-
-    let start = Instant::now();
-    let mut region = MmapMadviseNoUnmap::new(PAGE_2MIB)?;
-    let mmap_end = Instant::now();
-    let u64_pointer = region.get_mut().cast::<u64>();
-    unsafe {
-        *u64_pointer = 0x42;
-    }
-    let fault_end = Instant::now();
-    unsafe {
-        *u64_pointer = 0x43;
-    }
-    let second_write_end = Instant::now();
-
-    Ok(FaultLatency::new(
-        mmap_end - start,
-        fault_end - mmap_end,
-        second_write_end - fault_end,
-    ))
-}
-
 fn main() -> Result<(), Box<dyn Error>> {
     let config: FaultLatencyOptions = argh::from_env();
 
@@ -114,81 +95,107 @@ fn main() -> Result<(), Box<dyn Error>> {
         next += config.test_interval;
 
         let timing_4kib = fault_4kib()?;
-        std::thread::sleep(config.sleep_between_page_sizes);
-        let timing_2mib = fault_2mib()?;
 
-        let wallnow = OffsetDateTime::now_utc();
-        println!(
-            "{wallnow} 4kiB: mmap:{:?} fault:{:?} second_write:{:?};   2MiB: mmap:{:?} fault:{:?} second_write:{:?}",
-            timing_4kib.mmap, timing_4kib.fault, timing_4kib.second_write,
-            timing_2mib.mmap, timing_2mib.fault, timing_2mib.second_write,
-        );
+        #[cfg(target_os = "linux")]
+        {
+            std::thread::sleep(config.sleep_between_page_sizes);
+            let timing_2mib = fault_2mib()?;
 
-        // std::thread::sleep(next - Instant::now());
-        // next = next + config.test_interval;
+            let wallnow = OffsetDateTime::now_utc();
+            println!(
+                "{wallnow} 4kiB: mmap:{:?} fault:{:?} second_write:{:?};   2MiB: mmap:{:?} fault:{:?} second_write:{:?}",
+                timing_4kib.mmap, timing_4kib.fault, timing_4kib.second_write,
+                timing_2mib.mmap, timing_2mib.fault, timing_2mib.second_write,
+            );
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let wallnow = OffsetDateTime::now_utc();
+            println!(
+                "{wallnow} 4kiB: mmap:{:?} fault:{:?} second_write:{:?}",
+                timing_4kib.mmap, timing_4kib.fault, timing_4kib.second_write,
+            );
+        }
     }
 }
 
-/// Allocates a memory region with mmap that is aligned with a specific alignment. This can be used
-/// for huge page alignment. It allocates a region of size + alignment, then munmaps the extra.
-/// Unfortunately, the Linux kernel seems to prefer returning
-struct MmapMadviseNoUnmap {
-    _region: MmapRegion,
-    aligned_pointer: *mut c_void,
-}
+#[cfg(target_os = "linux")]
+mod linux {
 
-impl MmapMadviseNoUnmap {
-    fn new(size: usize) -> Result<Self, nix::errno::Errno> {
-        const ALIGNMENT_2MIB: usize = 2 << 20;
+    /// Allocates a memory region with mmap that is aligned with a specific alignment. This can be used
+    /// for huge page alignment. It allocates a region of size + alignment, then munmaps the extra.
+    /// Unfortunately, the Linux kernel seems to prefer returning
+    struct MmapMadviseNoUnmap {
+        _region: MmapRegion,
+        aligned_pointer: *mut c_void,
+    }
 
-        // worse case alignment: mmap returns 1 byte off the alignment, we must waste alignment-1 bytes.
-        // To ensure we can do this, we request size+alignment bytes.
-        // This shouldn't be so bad: untouched pages won't actually be allocated.
-        let align_rounded_size = size + ALIGNMENT_2MIB;
-        let region = MmapRegion::new(align_rounded_size)?;
+    impl MmapMadviseNoUnmap {
+        fn new(size: usize) -> Result<Self, nix::errno::Errno> {
+            const ALIGNMENT_2MIB: usize = 2 << 20;
 
-        // Calculate the aligned block, preferring the HIGHEST aligned address,
-        // since the kernel seems to allocate consecutive allocations downward.
-        // This allows consecutive calls to mmap to be contiguous, which MIGHT
-        // allow the kernel to coalesce them into huge pages? Not sure.
-        let allocation_end = region.get_mut() as usize + align_rounded_size;
-        let aligned_pointer =
-            align_pointer_value_down(ALIGNMENT_2MIB, allocation_end - size) as *mut c_void;
+            // worse case alignment: mmap returns 1 byte off the alignment, we must waste alignment-1 bytes.
+            // To ensure we can do this, we request size+alignment bytes.
+            // This shouldn't be so bad: untouched pages won't actually be allocated.
+            let align_rounded_size = size + ALIGNMENT_2MIB;
+            let region = MmapRegion::new(align_rounded_size)?;
 
-        assert!(region.get_mut() <= aligned_pointer);
-        assert!(aligned_pointer as usize + size <= allocation_end);
+            // Calculate the aligned block, preferring the HIGHEST aligned address,
+            // since the kernel seems to allocate consecutive allocations downward.
+            // This allows consecutive calls to mmap to be contiguous, which MIGHT
+            // allow the kernel to coalesce them into huge pages? Not sure.
+            let allocation_end = region.get_mut() as usize + align_rounded_size;
+            let aligned_pointer =
+                align_pointer_value_down(ALIGNMENT_2MIB, allocation_end - size) as *mut c_void;
 
-        unsafe {
-            nix::sys::mman::madvise(aligned_pointer, size, MmapAdvise::MADV_HUGEPAGE)
-                .expect("BUG: madvise must succeed");
+            assert!(region.get_mut() <= aligned_pointer);
+            assert!(aligned_pointer as usize + size <= allocation_end);
+
+            unsafe {
+                nix::sys::mman::madvise(aligned_pointer, size, MmapAdvise::MADV_HUGEPAGE)
+                    .expect("BUG: madvise must succeed");
+            }
+
+            Ok(Self {
+                _region: region,
+                aligned_pointer,
+            })
         }
 
-        Ok(Self {
-            _region: region,
-            aligned_pointer,
-        })
+        pub(crate) fn get_mut(&mut self) -> *mut c_void {
+            self.aligned_pointer
+        }
     }
 
-    pub(crate) fn get_mut(&mut self) -> *mut c_void {
-        self.aligned_pointer
+    fn align_pointer_value_down(alignment: usize, pointer_value: usize) -> usize {
+        // see bit hacks to check if power of two:
+        // https://graphics.stanford.edu/~seander/bithacks.html#DetermineIfPowerOf2
+        assert_eq!(0, (alignment & (alignment - 1)));
+        // round pointer_value down to nearest alignment; assumes there is sufficient space
+        let alignment_mask = !(alignment - 1);
+        pointer_value & alignment_mask
+    }
+
+    fn fault_2mib() -> Result<FaultLatency, nix::errno::Errno> {
+        const PAGE_2MIB: usize = 2 << 20;
+
+        let start = Instant::now();
+        let mut region = MmapMadviseNoUnmap::new(PAGE_2MIB)?;
+        let mmap_end = Instant::now();
+        let u64_pointer = region.get_mut().cast::<u64>();
+        unsafe {
+            *u64_pointer = 0x42;
+        }
+        let fault_end = Instant::now();
+        unsafe {
+            *u64_pointer = 0x43;
+        }
+        let second_write_end = Instant::now();
+
+        Ok(FaultLatency::new(
+            mmap_end - start,
+            fault_end - mmap_end,
+            second_write_end - fault_end,
+        ))
     }
 }
-
-fn align_pointer_value_down(alignment: usize, pointer_value: usize) -> usize {
-    // see bit hacks to check if power of two:
-    // https://graphics.stanford.edu/~seander/bithacks.html#DetermineIfPowerOf2
-    assert_eq!(0, (alignment & (alignment - 1)));
-    // round pointer_value down to nearest alignment; assumes there is sufficient space
-    let alignment_mask = !(alignment - 1);
-    pointer_value & alignment_mask
-}
-
-// #[cfg(test)]
-// mod test {
-//     use super::*;
-
-//     #[test]
-//     fn test_align_pointer_value() {
-//         assert_eq!(1, 2);
-//     }
-// }

@@ -65,6 +65,8 @@ impl MmapRegion {
         })
     }
 
+    // this is actually used by faultlatency; clippy doesn't find it?
+    #[allow(dead_code)]
     #[must_use]
     pub const fn get_mut(&self) -> *mut c_void {
         self.region.get_mut()
