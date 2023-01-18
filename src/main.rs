@@ -142,8 +142,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     if options.run_mode == RunMode::All || options.run_mode == RunMode::MmapHugeTLB1GiBOnly {
         let mem_before = memory_stats().unwrap();
         let start = Instant::now();
-        let mut v = match MmapRegion::new_zero_flags(
-            TEST_SIZE_U64,
+        let region = match MmapRegion::new_flags(
+            TEST_SIZE_BYTES,
             MapFlags::MAP_HUGETLB | MapFlags::MAP_HUGE_1GB,
         ) {
             Ok(v) => v,
@@ -155,7 +155,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                 return Err(Box::from(err));
             }
         };
-        for value in v.slice_mut().iter_mut() {
+        let slice: &mut [u64];
+        unsafe {
+            slice = slice::from_raw_parts_mut(region.get_mut().cast::<u64>(), TEST_SIZE_U64);
+        }
+
+        for value in slice.iter_mut() {
             *value = FILLED;
         }
         let end = Instant::now();
@@ -164,10 +169,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             "hugetlb 1GiB MmapSlice: alloc and filled {TEST_SIZE_GIB} GiB in {duration:?}; {}",
             humanunits::byte_rate_string(TEST_SIZE_BYTES, duration)
         );
-        let page_size = read_page_size(v.slice().as_ptr() as usize)?;
+        let page_size = read_page_size(region.get_mut() as usize)?;
         println!("  slice page size = {page_size}");
 
-        rnd_accesses(&mut rng, v.slice());
+        rnd_accesses(&mut rng, slice);
         let mem_after = memory_stats().unwrap();
         println!(
             "RSS before: {}; RSS after: {}; diff: {}",
@@ -180,10 +185,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             const SLEEP_DURATION: Duration = Duration::from_secs(60);
             println!("sleeping ...");
             sleep(SLEEP_DURATION);
-            println!("v[0]={}", v.slice()[0]);
+            println!("v[0]={}", slice[0]);
         }
 
-        drop(v);
+        drop(region);
 
         let mem_after_drop = memory_stats().unwrap();
         println!(

@@ -2,11 +2,18 @@
 
 This is a demonstration of using huge pages on Linux to get better performance. It allocates a 4 GiB chunk both using a Rust [`Vec`](https://doc.rust-lang.org/std/vec/struct.Vec.html) (which allocates memory with `malloc`), then using `mmap` to get a 2 MiB-aligned region. It then uses [`madvise(..., MADV_HUGEPAGE)`](https://man7.org/linux/man-pages/man2/madvise.2.html) to mark it for huge pages, then will touch the entire region to fault it in to memory. Finally, it does a random-access benchmark. This is probably the "best case" scenario for huge pages. It also test 1 GiB huge pages using `mmap(..., MAP_HUGETLB | MAP_HUGE_1GB)`, but that will require explicit configuration.
 
-On a "11th Gen Intel(R) Core(TM) i5-1135G7 @ 2.40GHz" (TigerLake from 2020), the transparent 2 MiB huge page version is about 2.9X faster, and the 1 GiB huge page version is 3.1X faster (8% faster than 2MiB pages). On an older "Intel(R) Xeon(R) Platinum 8259CL CPU @ 2.50GHz" (AWS m5d.4xlarge), the transparent 2 MiB huge page version is about 2X faster, and I did not test the GiB huge pages. This seems to suggest that programs that make random accesses to large amounts of memory will benefit from huge pages. The benefit from the gigabyte huge pages is minimal, so probably not worth the pain of having to manually configure them.
+On a "11th Gen Intel(R) Core(TM) i5-1135G7 @ 2.40GHz" (TigerLake from 2020), the transparent 2 MiB huge page version is about 2.9× faster, and the 1 GiB huge page version is 3.1× faster (8% faster than 2MiB pages). On an older "Intel(R) Xeon(R) Platinum 8259CL CPU @ 2.50GHz" (AWS m5d.4xlarge), the transparent 2 MiB huge page version is about 2× faster, and I did not test the GiB huge pages. This seems to suggest that programs that make random accesses to large amounts of memory will benefit from huge pages. The benefit from the gigabyte huge pages is minimal, so probably not worth the pain of having to manually configure them.
 
 As of 2022-01-10, the Linux kernel only supports a single size of transparent huge pages. The size will be reported as `Hugepagesize` in `/proc/meminfo`. On x86_64, this will be 2 MiB. For Arm (aarch64), most recent Linux distributions also defalut to 4 kiB/2 MiB pages. Redhat used to use 64 kiB pages, but [RHEL 9 changed it to 4 kiB around 2021-07](https://bugzilla.redhat.com/show_bug.cgi?id=1978730).
 
 When running as root, it is possible to check if a specific address is a huge page. It is also possible to get the amount of memory allocated for a specific range as huge pages, by examining the `AnonHugePages` line in `/proc/self/smaps`. The `thp_` statistics in `/proc/vmstat` also can tell you if this worked by checking `thp_fault_alloc` and `thp_fault_fallback` before and after the allocation. Sometimes the kernel will not be able to find huge pages. This program only tests the first page, so it won't be able to tell if the huge page allocation fails. See [the Monitoring usage section in the kernel's transhuge.txt for details](https://www.kernel.org/doc/Documentation/vm/transhuge.txt).
+
+TODO: It would be nice to check for page allocation latency. It seems likely that [fragmenting huge pages then allocating huge pages should have higher latencies](https://nitingupta.dev/post/linux-kernel-hugepage-allocation-latencies/). The `faultlatency` program in this repository is intended to test this, but I didn't (yet) implement the part that fragments memory. On my test machine, it prints the following times to allocate then touch 4 kiB and 2 MiB pages. This suggests it takes a bit longer to make two syscalls for mmap+madvise, then about 28× longer to fault the page initally. This is less bad than I was expecting, since the page is 512× larger.
+
+```
+4kiB: mmap:16.665µs fault:15.193µs second_write:124ns;   2MiB: mmap:20.884µs fault:428.13µs second_write:122ns
+```
+
 
 ### Mac OS X Super Pages
 

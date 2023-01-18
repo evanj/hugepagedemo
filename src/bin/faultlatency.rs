@@ -1,8 +1,4 @@
 use hugepagedemo::MmapRegion;
-#[cfg(target_os = "linux")]
-use nix::sys::mman::MmapAdvise;
-#[cfg(target_os = "linux")]
-use std::ffi::c_void;
 use std::{
     error::Error,
     time::{Duration, Instant},
@@ -45,7 +41,7 @@ fn argh_parse_go_duration(s: &str) -> Result<Duration, String> {
     }
 }
 
-struct FaultLatency {
+pub struct FaultLatency {
     mmap: Duration,
     fault: Duration,
     second_write: Duration,
@@ -99,7 +95,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         #[cfg(target_os = "linux")]
         {
             std::thread::sleep(config.sleep_between_page_sizes);
-            let timing_2mib = fault_2mib()?;
+            let timing_2mib = linux::fault_2mib()?;
 
             let wallnow = OffsetDateTime::now_utc();
             println!(
@@ -121,6 +117,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 #[cfg(target_os = "linux")]
 mod linux {
+    use hugepagedemo::MmapRegion;
+    use nix::sys::mman::MmapAdvise;
+    use std::{ffi::c_void, time::Instant};
+
+    use crate::FaultLatency;
 
     /// Allocates a memory region with mmap that is aligned with a specific alignment. This can be used
     /// for huge page alignment. It allocates a region of size + alignment, then munmaps the extra.
@@ -176,7 +177,7 @@ mod linux {
         pointer_value & alignment_mask
     }
 
-    fn fault_2mib() -> Result<FaultLatency, nix::errno::Errno> {
+    pub fn fault_2mib() -> Result<FaultLatency, nix::errno::Errno> {
         const PAGE_2MIB: usize = 2 << 20;
 
         let start = Instant::now();
