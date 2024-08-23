@@ -1,3 +1,4 @@
+use clap::Parser;
 use hugepagedemo::MmapOwner;
 use memory_stats::memory_stats;
 use nix::sys::mman::{MapFlags, ProtFlags};
@@ -6,13 +7,10 @@ use rand::{distributions::Uniform, RngCore, SeedableRng};
 use std::error::Error;
 use std::num::NonZeroUsize;
 use std::os::raw::c_void;
+use std::ptr::NonNull;
 use std::slice;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
-
-#[cfg(any(test, target_os = "linux"))]
-#[macro_use]
-extern crate lazy_static;
 
 mod anyos_hugepages;
 mod mmaputils;
@@ -39,19 +37,20 @@ use notlinux_hugepages::read_page_size;
 
 const FILLED: u64 = 0x42;
 
-#[derive(argh::FromArgs)]
+#[derive(Debug, Parser)]
+#[command(version, about, long_about = None)]
 /// Control the options for the huge page demo.
 struct HugePageDemoOptions {
     /// disable using mmap with madvise.
-    #[argh(option, default = "RunMode::All")]
+    #[arg(long, default_value_t = RunMode::All)]
     run_mode: RunMode,
 
     /// sleep for 60 seconds before dropping the mmap, to allow examining the process state.
-    #[argh(switch)]
+    #[arg(long)]
     sleep_before_drop: bool,
 }
 
-#[derive(strum::EnumString, Eq, PartialEq)]
+#[derive(strum::Display, strum::EnumString, Eq, PartialEq, Debug, Clone)]
 enum RunMode {
     All,
     VecOnly,
@@ -64,11 +63,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     const TEST_SIZE_BYTES: usize = TEST_SIZE_GIB * 1024 * 1024 * 1024;
     const TEST_SIZE_U64: usize = TEST_SIZE_BYTES / 8;
 
-    let options: HugePageDemoOptions = argh::from_env();
+    let options = HugePageDemoOptions::parse();
 
-    // the rand book suggests Xoshiro256Plus is fast and pretty good:
+    // the rand book suggests SmallRng is fast and pretty good:
     // https://rust-random.github.io/book/guide-rngs.html
-    let mut rng = rand_xoshiro::Xoshiro256Plus::from_entropy();
+    let mut rng = rand::rngs::SmallRng::from_entropy();
 
     let mem_before = memory_stats().unwrap();
     if options.run_mode == RunMode::All || options.run_mode == RunMode::VecOnly {
@@ -228,15 +227,13 @@ impl MmapHugeMadviseAligned {
         let align_rounded_size =
             NonZeroUsize::new(size + alignment).expect("BUG: alignment and size must be > 0");
 
-        let mmap_pointer: *mut c_void;
+        let mmap_pointer: NonNull<c_void>;
         unsafe {
-            mmap_pointer = nix::sys::mman::mmap(
+            mmap_pointer = nix::sys::mman::mmap_anonymous(
                 None,
                 align_rounded_size,
                 ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
                 MapFlags::MAP_ANONYMOUS | MapFlags::MAP_PRIVATE | flags,
-                0,
-                0,
             )?;
         }
 
@@ -244,18 +241,18 @@ impl MmapHugeMadviseAligned {
         // since the kernel seems to allocate consecutive allocations downward.
         // This allows consecutive calls to mmap to be contiguous, which MIGHT
         // allow the kernel to coalesce them into huge pages? Not sure.
-        let allocation_end = mmap_pointer as usize + align_rounded_size.get();
-        let aligned_pointer =
-            align_pointer_value_down(alignment, allocation_end - size) as *mut c_void;
+        let mmap_pointer_usize = mmap_pointer.as_ptr() as usize;
+        let allocation_end = mmap_pointer_usize + align_rounded_size.get();
+        let aligned_pointer_usize = align_pointer_value_down(alignment, allocation_end - size);
         // alternative of taking the lowest aligned address
         // let aligned_pointer =
         //     align_pointer_value_up(alignment, mmap_pointer as usize) as *mut c_void;
 
-        assert!(mmap_pointer <= aligned_pointer);
-        assert!(aligned_pointer as usize + size <= allocation_end);
+        assert!(mmap_pointer_usize <= aligned_pointer_usize);
+        assert!(aligned_pointer_usize + size <= allocation_end);
 
-        let unaligned_below_size = aligned_pointer as usize - mmap_pointer as usize;
-        let aligned_end = aligned_pointer as usize + size;
+        let unaligned_below_size = aligned_pointer_usize - mmap_pointer_usize;
+        let aligned_end = aligned_pointer_usize + size;
         let unaligned_above_size = allocation_end - aligned_end;
         // println!(
         //     "mmap_pointer:0x{:x} - unaligned_below_end:0x{:x}; aligned_pointer:0x{:x} - aligned_end:0x{:x}; unaligned_above_end:0x{:x}",
@@ -267,8 +264,8 @@ impl MmapHugeMadviseAligned {
         // );
 
         // if there is an unused section BELOW the allocation: unmap it
-        if aligned_pointer != mmap_pointer {
-            let unaligned_size = aligned_pointer as usize - mmap_pointer as usize;
+        if aligned_pointer_usize != mmap_pointer_usize {
+            let unaligned_size = aligned_pointer_usize - mmap_pointer_usize;
             unsafe {
                 nix::sys::mman::munmap(mmap_pointer, unaligned_size)
                     .expect("BUG: munmap must succeed");
@@ -277,8 +274,9 @@ impl MmapHugeMadviseAligned {
 
         // if there is an unused section ABOVE the allocation: unmap it
         if unaligned_above_size != 0 {
+            let aligned_end_pointer = NonNull::new(aligned_end as *mut c_void).unwrap();
             unsafe {
-                nix::sys::mman::munmap(aligned_end as *mut c_void, unaligned_above_size)
+                nix::sys::mman::munmap(aligned_end_pointer, unaligned_above_size)
                     .expect("BUG: munmap must succeed");
             }
         }
@@ -288,6 +286,7 @@ impl MmapHugeMadviseAligned {
             align_rounded_size.get()
         );
 
+        let aligned_pointer = NonNull::new(aligned_pointer_usize as *mut c_void).unwrap();
         Ok(Self {
             region: MmapOwner::new(aligned_pointer, size),
         })
@@ -454,5 +453,7 @@ mod test {
 
             v.push(aligned_alloc);
         }
+        // explicitly drop v: makes clippy happy because v is now used
+        drop(v);
     }
 }

@@ -1,4 +1,6 @@
 use nix::unistd::SysconfVar;
+#[cfg(any(test, target_os = "linux"))]
+use std::sync::LazyLock;
 
 #[cfg(any(test, target_os = "linux"))]
 #[derive(PartialEq, Eq, Debug)]
@@ -37,9 +39,8 @@ impl std::fmt::Display for HugepageSetting {
 
 #[cfg(any(test, target_os = "linux"))]
 pub fn parse_hugepage_enabled(input: &[u8]) -> Result<HugepageSetting, String> {
-    lazy_static! {
-        static ref RE: regex::bytes::Regex = regex::bytes::Regex::new(r#"\[([^\]]+)\]"#).unwrap();
-    }
+    static RE: LazyLock<regex::bytes::Regex> =
+        LazyLock::new(|| regex::bytes::Regex::new(r"\[([^\]]+)\]").unwrap());
 
     let string_matches = RE.captures(input);
     if string_matches.is_none() {

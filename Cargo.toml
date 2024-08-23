@@ -8,6 +8,20 @@ license = "MIT"
 repository = "https://github.com/evanj/hugepagedemo"
 keywords = ["page", "hugepage", "madvise", "thp", "tlb"]
 categories = ["command-line-utilities"]
+publish = false
+
+[lints.clippy]
+cargo = "deny"
+nursery = "deny"
+pedantic = "deny"
+style = "deny"
+cast_possible_truncation = { level = "allow", priority = 1 }
+cast_precision_loss = { level = "allow", priority = 1 }
+cast_sign_loss = { level = "allow", priority = 1 }
+missing_errors_doc = { level = "allow", priority = 1 }
+missing_panics_doc = { level = "allow", priority = 1 }
+multiple-crate-versions = { level = "allow", priority = 1 }
+too_many_lines = { level = "allow", priority = 1 }
 
 [profile.release-nativecpu]
 inherits = "release"
@@ -18,14 +32,12 @@ debug = true
 #rustflags = ["-C", "target-cpu=native"]
 
 [dependencies]
-argh = "0.1.9"
+clap = { version="4", features = ["derive"] }
 go-parse-duration = "0"
-humanunits = {git="https://github.com/evanj/humanunits"}
-lazy_static = "1"
+humanunits = { git="https://github.com/evanj/humanunits" }
 memory-stats = "1"
-nix = {version="0", features=["mman"]}
-rand = "0"
-rand_xoshiro = "0"
+nix = { version="0", features=["mman", "feature"] }
+rand = { version="0", features = ["small_rng"] }
 regex = "1"
 strum = { version = "0", features = ["derive"] }
 time = { version="0", features=["std"]}

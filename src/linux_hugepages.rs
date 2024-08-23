@@ -6,6 +6,7 @@ use std::fs::File;
 use std::io::Read;
 use std::io::Seek;
 use std::io::SeekFrom;
+use std::ptr::NonNull;
 
 // See: https://www.kernel.org/doc/Documentation/vm/transhuge.txt
 const HUGEPAGE_ENABLED_PATH: &str = "/sys/kernel/mm/transparent_hugepage/enabled";
@@ -24,7 +25,7 @@ pub fn print_hugepage_setting_on_linux() -> Result<(), Box<dyn Error>> {
 pub fn madvise_hugepages_on_linux(slice: &mut [u64]) {
     const HUGEPAGE_FLAGS: MmapAdvise = MmapAdvise::MADV_HUGEPAGE;
 
-    let slice_pointer = slice.as_mut_ptr().cast::<c_void>();
+    let slice_pointer = NonNull::new(slice.as_mut_ptr().cast::<c_void>()).unwrap();
     let slice_byte_len = slice.len() * 8;
     unsafe {
         nix::sys::mman::madvise(slice_pointer, slice_byte_len, HUGEPAGE_FLAGS)

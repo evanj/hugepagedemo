@@ -1,3 +1,4 @@
+use clap::Parser;
 use hugepagedemo::MmapRegion;
 use std::{
     error::Error,
@@ -5,30 +6,23 @@ use std::{
 };
 use time::OffsetDateTime;
 
-#[derive(argh::FromArgs)]
 /// Control the options for fault latency testing.
+#[derive(Debug, Parser)]
+#[command(version, about, long_about = None)]
 struct FaultLatencyOptions {
     /// probe the page latency at this interval.
-    #[argh(
-        option,
-        default = "Duration::from_secs(1)",
-        from_str_fn(argh_parse_go_duration)
-    )]
+    #[arg(long, default_value = "1s", value_parser(clap_parse_go_duration))]
     test_interval: Duration,
 
     /// sleep duration between probing the different page sizes.
     // allow(dead_code) for Mac OS X where the option is unused
-    #[allow(dead_code)]
-    #[argh(
-        option,
-        default = "Duration::from_millis(100)",
-        from_str_fn(argh_parse_go_duration)
-    )]
+    //#[allow(dead_code)]
+    #[arg(long, default_value = "100ms", value_parser(clap_parse_go_duration))]
     sleep_between_page_sizes: Duration,
 }
 
-/// Parses a duration using Go's formats, with the signature required by argh.
-fn argh_parse_go_duration(s: &str) -> Result<Duration, String> {
+/// Parses a duration using Go's formats, with the signature required by clap.
+fn clap_parse_go_duration(s: &str) -> Result<Duration, String> {
     let result = go_parse_duration::parse_duration(s);
     match result {
         Err(err) => Err(format!("{err:?}")),
@@ -80,8 +74,9 @@ fn fault_4kib() -> Result<FaultLatency, nix::errno::Errno> {
     ))
 }
 
+#[allow(clippy::similar_names)]
 fn main() -> Result<(), Box<dyn Error>> {
-    let config: FaultLatencyOptions = argh::from_env();
+    let config = FaultLatencyOptions::parse();
 
     let mut next = Instant::now() + config.test_interval;
     loop {
@@ -119,6 +114,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 mod linux {
     use hugepagedemo::MmapRegion;
     use nix::sys::mman::MmapAdvise;
+    use std::ptr::NonNull;
     use std::{ffi::c_void, time::Instant};
 
     use crate::FaultLatency;
@@ -128,7 +124,7 @@ mod linux {
     /// Unfortunately, the Linux kernel seems to prefer returning
     struct MmapMadviseNoUnmap {
         _region: MmapRegion,
-        aligned_pointer: *mut c_void,
+        aligned_pointer: NonNull<c_void>,
     }
 
     impl MmapMadviseNoUnmap {
@@ -146,12 +142,13 @@ mod linux {
             // This allows consecutive calls to mmap to be contiguous, which MIGHT
             // allow the kernel to coalesce them into huge pages? Not sure.
             let allocation_end = region.get_mut() as usize + align_rounded_size;
-            let aligned_pointer =
-                align_pointer_value_down(ALIGNMENT_2MIB, allocation_end - size) as *mut c_void;
+            let aligned_pointer_usize =
+                align_pointer_value_down(ALIGNMENT_2MIB, allocation_end - size);
 
-            assert!(region.get_mut() <= aligned_pointer);
-            assert!(aligned_pointer as usize + size <= allocation_end);
+            assert!(region.ptr_as_usize() <= aligned_pointer_usize);
+            assert!(aligned_pointer_usize + size <= allocation_end);
 
+            let aligned_pointer = NonNull::new(aligned_pointer_usize as *mut c_void).unwrap();
             unsafe {
                 nix::sys::mman::madvise(aligned_pointer, size, MmapAdvise::MADV_HUGEPAGE)
                     .expect("BUG: madvise must succeed");
@@ -163,8 +160,8 @@ mod linux {
             })
         }
 
-        pub(crate) fn get_mut(&mut self) -> *mut c_void {
-            self.aligned_pointer
+        const fn as_ptr(&self) -> *mut c_void {
+            self.aligned_pointer.as_ptr()
         }
     }
 
@@ -181,9 +178,9 @@ mod linux {
         const PAGE_2MIB: usize = 2 << 20;
 
         let start = Instant::now();
-        let mut region = MmapMadviseNoUnmap::new(PAGE_2MIB)?;
+        let region = MmapMadviseNoUnmap::new(PAGE_2MIB)?;
         let mmap_end = Instant::now();
-        let u64_pointer = region.get_mut().cast::<u64>();
+        let u64_pointer = region.as_ptr().cast::<u64>();
         unsafe {
             *u64_pointer = 0x42;
         }
