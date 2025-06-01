@@ -95,8 +95,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             let wallnow = OffsetDateTime::now_utc();
             println!(
                 "{wallnow} 4kiB: mmap:{:?} fault:{:?} second_write:{:?};   2MiB: mmap:{:?} fault:{:?} second_write:{:?}",
-                timing_4kib.mmap, timing_4kib.fault, timing_4kib.second_write,
-                timing_2mib.mmap, timing_2mib.fault, timing_2mib.second_write,
+                timing_4kib.mmap,
+                timing_4kib.fault,
+                timing_4kib.second_write,
+                timing_2mib.mmap,
+                timing_2mib.fault,
+                timing_2mib.second_write,
             );
         }
         #[cfg(not(target_os = "linux"))]

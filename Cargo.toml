@@ -1,7 +1,7 @@
 [package]
 name = "hugepagedemo"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 default-run = "hugepagedemo"
 description = "Demonstration of the performance impact of huge pages in the Linux kernel."
 license = "MIT"
@@ -37,7 +37,7 @@ go-parse-duration = "0"
 humanunits = { git="https://github.com/evanj/humanunits" }
 memory-stats = "1"
 nix = { version="0", features=["mman", "feature"] }
-rand = { version="0", features = ["small_rng"] }
+rand = { version="0" }
 regex = "1"
 strum = { version = "0", features = ["derive"] }
 time = { version="0", features=["std"]}

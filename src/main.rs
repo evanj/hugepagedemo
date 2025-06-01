@@ -2,8 +2,8 @@ use clap::Parser;
 use hugepagedemo::MmapOwner;
 use memory_stats::memory_stats;
 use nix::sys::mman::{MapFlags, ProtFlags};
-use rand::distributions::Distribution;
-use rand::{distributions::Uniform, RngCore, SeedableRng};
+use rand::distr::Distribution;
+use rand::{RngCore, SeedableRng, distr::Uniform};
 use std::error::Error;
 use std::num::NonZeroUsize;
 use std::os::raw::c_void;
@@ -67,7 +67,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // the rand book suggests SmallRng is fast and pretty good:
     // https://rust-random.github.io/book/guide-rngs.html
-    let mut rng = rand::rngs::SmallRng::from_entropy();
+    let mut rng = rand::rngs::SmallRng::from_os_rng();
 
     let mem_before = memory_stats().unwrap();
     if options.run_mode == RunMode::All || options.run_mode == RunMode::VecOnly {
@@ -147,7 +147,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         ) {
             Ok(v) => v,
             Err(nix::Error::ENOMEM) => {
-                println!("ENOMEM: try reserving huge pages with: echo {} | sudo tee /sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages", TEST_SIZE_U64*8/(1<<30));
+                println!(
+                    "ENOMEM: try reserving huge pages with: echo {} | sudo tee /sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages",
+                    TEST_SIZE_U64 * 8 / (1 << 30)
+                );
                 return Err(Box::from(nix::Error::ENOMEM));
             }
             Err(err) => {
@@ -322,7 +325,7 @@ struct MmapU64Slice<'a> {
     slice: &'a mut [u64],
 }
 
-impl<'a> MmapU64Slice<'a> {
+impl MmapU64Slice<'_> {
     fn new_zero(items: usize) -> Result<Self, nix::errno::Errno> {
         Self::new_zero_flags(items, MapFlags::empty())
     }
@@ -357,15 +360,15 @@ impl<'a> MmapU64Slice<'a> {
         Ok(m)
     }
 
-    fn slice(&self) -> &[u64] {
+    const fn slice(&self) -> &[u64] {
         self.slice
     }
 
-    fn slice_mut(&mut self) -> &mut [u64] {
+    const fn slice_mut(&mut self) -> &mut [u64] {
         self.slice
     }
 
-    fn mmap_parts(&mut self) -> (*mut u64, usize) {
+    const fn mmap_parts(&mut self) -> (*mut u64, usize) {
         let mmap_pointer = self.slice_mut().as_mut_ptr();
         let mmap_len = self.slice.len() * 8;
         (mmap_pointer, mmap_len)
@@ -375,7 +378,7 @@ impl<'a> MmapU64Slice<'a> {
 fn rnd_accesses(rng: &mut dyn RngCore, data: &[u64]) {
     const NUM_ACCESSES: usize = 200_000_000;
 
-    let index_distribution = Uniform::from(0..data.len());
+    let index_distribution = Uniform::new(0, data.len()).unwrap();
     let start = Instant::now();
     for _ in 0..NUM_ACCESSES {
         let index = index_distribution.sample(rng);

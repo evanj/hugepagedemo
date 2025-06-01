@@ -14,6 +14,11 @@ TODO: It would be nice to check for page allocation latency. It seems likely tha
 4kiB: mmap:16.665µs fault:15.193µs second_write:124ns;   2MiB: mmap:20.884µs fault:428.13µs second_write:122ns
 ```
 
+### CPU support
+
+* x86-64 supports 2 MiB and 1 GiB huge pages, according to `ls /sys/kernel/mm/hugepages`. Transparent pages are configured as 2 MiB according to `cat /sys/kernel/mm/transparent_hugepage/hpage_pmd_size`.
+* ARM Neoverse V2 (e.g. AWS Graviton4, GCP Axion) supports 64 kiB, 2 MiB, 32 MiB, and 1 GiB huge pages according to `ls /sys/kernel/mm/hugepages`. Transparent pages are configured as 2 MiB.
+
 
 ### Mac OS X Super Pages
 

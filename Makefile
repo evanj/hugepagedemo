@@ -2,7 +2,7 @@ CFLAGS=-Wall -Wextra -Werror -g -std=c17
 
 all: aligned_alloc_demo
 	cargo fmt
-	cargo test
+	cargo test --all-targets
 	cargo check
 	cargo clippy --all-targets --all-features -- -D warnings
 	cargo verify-project
